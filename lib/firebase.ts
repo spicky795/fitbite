@@ -219,3 +219,33 @@ export function subscribeToUserData(
     unsubWeights();
   };
 }
+
+export async function saveCustomFoodToFirestore(userId: string, food: any) {
+  const { db } = initFirebase();
+  if (!db) return;
+
+  try {
+    const docRef = doc(db, 'users', userId, 'custom_foods', food.id);
+    await setDoc(docRef, food);
+  } catch (err) {
+    console.error('Failed to save custom food to Firestore:', err);
+  }
+}
+
+export async function fetchCustomFoodsFromFirestore(userId: string): Promise<any[]> {
+  const { db } = initFirebase();
+  if (!db) return [];
+
+  try {
+    const { getDocs } = await import('firebase/firestore');
+    const colRef = collection(db, 'users', userId, 'custom_foods');
+    const snap = await getDocs(colRef);
+    const items: any[] = [];
+    snap.forEach((d) => items.push(d.data()));
+    return items;
+  } catch (err) {
+    console.error('Failed to fetch custom foods from Firestore:', err);
+    return [];
+  }
+}
+

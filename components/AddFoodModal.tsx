@@ -4,7 +4,8 @@ import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { useApp, MealType } from '../context/AppContext';
 import { FOOD_DATABASE, FoodItem } from '../data/foodDatabase';
 import { calculateNutrients, NutrientBreakdown } from '../lib/calorieEngine';
-import { Search, X, ChevronLeft, ChevronDown, Check, Plus, Minus } from 'lucide-react';
+import { saveCustomFoodToFirestore } from '../lib/firebase';
+import { Search, X, ChevronLeft, Plus, Minus, Globe, Sparkles, Database, Loader2 } from 'lucide-react';
 
 export const AddFoodModal: React.FC = () => {
   const {
@@ -13,6 +14,8 @@ export const AddFoodModal: React.FC = () => {
     activeMealType,
     selectedDate,
     addFoodLog,
+    userId,
+    isCloudConnected,
   } = useApp();
 
   const [searchQuery, setSearchQuery] = useState('');
@@ -22,6 +25,18 @@ export const AddFoodModal: React.FC = () => {
   const [quantity, setQuantity] = useState<number>(1);
   const [mealType, setMealType] = useState<MealType>(activeMealType);
 
+  // Live API Search results & Loading state
+  const [searchResults, setSearchResults] = useState<FoodItem[]>(FOOD_DATABASE);
+  const [isSearchingApi, setIsSearchingApi] = useState(false);
+
+  // Add Custom Food Mode
+  const [isCustomMode, setIsCustomMode] = useState(false);
+  const [customName, setCustomName] = useState('');
+  const [customCalories, setCustomCalories] = useState<number>(150);
+  const [customProtein, setCustomProtein] = useState<number>(5);
+  const [customCarbs, setCustomCarbs] = useState<number>(20);
+  const [customFat, setCustomFat] = useState<number>(4);
+
   const searchInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -30,6 +45,8 @@ export const AddFoodModal: React.FC = () => {
       setSelectedFood(null);
       setSearchQuery('');
       setSelectedCategory('All');
+      setIsCustomMode(false);
+      setSearchResults(FOOD_DATABASE);
       setTimeout(() => {
         searchInputRef.current?.focus();
       }, 100);
@@ -44,23 +61,55 @@ export const AddFoodModal: React.FC = () => {
     }
   }, [selectedFood]);
 
+  // Live Search Effect: queries /api/foods/search (USDA + Open Food Facts + Local) with 250ms debounce
+  useEffect(() => {
+    const trimmed = searchQuery.trim();
+    if (!trimmed) {
+      setSearchResults(FOOD_DATABASE);
+      setIsSearchingApi(false);
+      return;
+    }
+
+    // Instant local filter first
+    const lower = trimmed.toLowerCase();
+    const instantLocal = FOOD_DATABASE.filter((f) => {
+      return (
+        f.name.toLowerCase().includes(lower) ||
+        f.aliases.some((a) => a.toLowerCase().includes(lower)) ||
+        f.region?.toLowerCase().includes(lower)
+      );
+    });
+    if (instantLocal.length > 0) {
+      setSearchResults(instantLocal);
+    }
+
+    // Debounced query to live database APIs (USDA + Open Food Facts)
+    setIsSearchingApi(true);
+    const timeout = setTimeout(async () => {
+      try {
+        const res = await fetch(`/api/foods/search?q=${encodeURIComponent(trimmed)}`);
+        if (res.ok) {
+          const json = await res.json();
+          if (Array.isArray(json.results) && json.results.length > 0) {
+            setSearchResults(json.results);
+          }
+        }
+      } catch (err) {
+        console.error('Failed to query live nutrition API:', err);
+      } finally {
+        setIsSearchingApi(false);
+      }
+    }, 250);
+
+    return () => clearTimeout(timeout);
+  }, [searchQuery]);
+
   const categories = ['All', 'Breakfast', 'Curry & Dal', 'Bread & Rice', 'Protein', 'Dairy', 'Snack & Sweet', 'Fruit & Veg', 'Beverage'];
 
   const filteredFoods = useMemo(() => {
-    const query = searchQuery.trim().toLowerCase();
-    return FOOD_DATABASE.filter((food) => {
-      const matchesCategory = selectedCategory === 'All' || food.category === selectedCategory;
-      if (!matchesCategory) return false;
-
-      if (!query) return true;
-      if (food.name.toLowerCase().includes(query)) return true;
-      if (food.aliases.some((alias) => alias.toLowerCase().includes(query))) return true;
-      if (food.region?.toLowerCase().includes(query)) return true;
-      if (food.category.toLowerCase().includes(query)) return true;
-
-      return false;
-    });
-  }, [searchQuery, selectedCategory]);
+    if (selectedCategory === 'All') return searchResults;
+    return searchResults.filter((f) => f.category === selectedCategory);
+  }, [searchResults, selectedCategory]);
 
   const calculatedNutrients: NutrientBreakdown = useMemo(() => {
     if (!selectedFood) {
@@ -103,20 +152,60 @@ export const AddFoodModal: React.FC = () => {
     closeAddModal();
   };
 
+  const handleCreateCustomDish = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!customName.trim()) return;
+
+    const newFood: FoodItem = {
+      id: `custom_${Date.now()}`,
+      name: customName.trim(),
+      category: 'Indian Dish',
+      region: 'Custom Recipe',
+      calories_per_100g: Number(customCalories) || 100,
+      protein_per_100g: Number(customProtein) || 0,
+      carbs_per_100g: Number(customCarbs) || 0,
+      fat_per_100g: Number(customFat) || 0,
+      fiber_per_100g: 1.0,
+      default_serving_unit: 'serving',
+      servings: [
+        { id: 'serving', name: 'serving', label: '1 serving (~150g)', grams: 150, isDefault: true },
+        { id: 'g', name: 'g', label: 'Grams (g)', grams: 1 },
+      ],
+      aliases: [customName.toLowerCase()],
+      source: 'Standard Recipe',
+    };
+
+    if (isCloudConnected) {
+      await saveCustomFoodToFirestore(userId, newFood);
+    }
+
+    setSearchResults((prev) => [newFood, ...prev]);
+    setSelectedFood(newFood);
+    setIsCustomMode(false);
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/40 backdrop-blur-xs animate-fade-in">
       <div className="bg-white rounded-[28px] w-full max-w-md max-h-[92vh] flex flex-col shadow-2xl overflow-hidden border border-[#E9ECE9]">
-        {/* Header (Matches Reference Image 2 Screen 2) */}
+        {/* Header */}
         <div className="px-5 py-4 flex items-center justify-between border-b border-[#F2F4F2]">
           <button
-            onClick={() => (selectedFood ? setSelectedFood(null) : closeAddModal())}
+            onClick={() => {
+              if (selectedFood) setSelectedFood(null);
+              else if (isCustomMode) setIsCustomMode(false);
+              else closeAddModal();
+            }}
             className="w-9 h-9 rounded-full bg-[#F4F6F4] hover:bg-[#E8ECE8] flex items-center justify-center text-[#111418] transition-colors cursor-pointer"
           >
             <ChevronLeft className="w-5 h-5" />
           </button>
 
           <h2 className="text-sm font-bold text-[#111418]">
-            {selectedFood ? 'Food Details' : 'Add Food'}
+            {selectedFood
+              ? 'Food Details'
+              : isCustomMode
+              ? 'Add Custom Dish'
+              : 'Add Food'}
           </h2>
 
           <button
@@ -129,8 +218,87 @@ export const AddFoodModal: React.FC = () => {
 
         {/* Content Body */}
         <div className="flex-1 overflow-y-auto p-5 space-y-4">
-          {!selectedFood ? (
-            /* --- SEARCH VIEW --- */
+          {isCustomMode ? (
+            /* --- ADD CUSTOM DISH FORM (Saves to Cloud Firestore) --- */
+            <form onSubmit={handleCreateCustomDish} className="space-y-3.5">
+              <div className="p-3 bg-[#F4F6F4] rounded-2xl flex items-center gap-2 text-xs text-[#48631C]">
+                <Database className="w-4 h-4 text-[#6B9322] shrink-0" />
+                <span>This dish will be saved permanently to your Cloud Database.</span>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-[#737A80] mb-1">Dish Name</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. My Special Chicken Curry, Semiya Kheer"
+                  value={customName}
+                  onChange={(e) => setCustomName(e.target.value)}
+                  className="w-full bg-[#F8FAF8] border border-[#E0E5E0] focus:border-[#BCE640] rounded-xl px-3 py-2 text-xs font-bold text-[#111418] focus:outline-none"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-xs font-semibold text-[#737A80] mb-1">Calories (per 100g)</label>
+                  <input
+                    type="number"
+                    required
+                    min="1"
+                    value={customCalories}
+                    onChange={(e) => setCustomCalories(Number(e.target.value))}
+                    className="w-full bg-[#F8FAF8] border border-[#E0E5E0] focus:border-[#BCE640] rounded-xl px-3 py-2 text-xs font-bold text-[#111418] focus:outline-none text-center"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-[#737A80] mb-1">Protein (g per 100g)</label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    required
+                    value={customProtein}
+                    onChange={(e) => setCustomProtein(Number(e.target.value))}
+                    className="w-full bg-[#F8FAF8] border border-[#E0E5E0] focus:border-[#BCE640] rounded-xl px-3 py-2 text-xs font-bold text-[#111418] focus:outline-none text-center"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-xs font-semibold text-[#737A80] mb-1">Carbs (g per 100g)</label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    required
+                    value={customCarbs}
+                    onChange={(e) => setCustomCarbs(Number(e.target.value))}
+                    className="w-full bg-[#F8FAF8] border border-[#E0E5E0] focus:border-[#BCE640] rounded-xl px-3 py-2 text-xs font-bold text-[#111418] focus:outline-none text-center"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-[#737A80] mb-1">Fat (g per 100g)</label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    required
+                    value={customFat}
+                    onChange={(e) => setCustomFat(Number(e.target.value))}
+                    className="w-full bg-[#F8FAF8] border border-[#E0E5E0] focus:border-[#BCE640] rounded-xl px-3 py-2 text-xs font-bold text-[#111418] focus:outline-none text-center"
+                  />
+                </div>
+              </div>
+
+              <div className="pt-2">
+                <button
+                  type="submit"
+                  className="w-full py-3 px-4 rounded-full bg-[#D4F672] hover:bg-[#C2E84E] text-[#111418] font-black text-xs shadow-xs transition-all cursor-pointer"
+                >
+                  Save Dish & Select
+                </button>
+              </div>
+            </form>
+          ) : !selectedFood ? (
+            /* --- SEARCH VIEW WITH LIVE NUTRITION DATABASES --- */
             <>
               {/* Search Bar */}
               <div className="relative">
@@ -140,17 +308,19 @@ export const AddFoodModal: React.FC = () => {
                   type="text"
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Search chicken biryani, dosa, roti, egg, dal..."
-                  className="w-full bg-[#F5F7F5] border border-[#EBEFEB] focus:border-[#BCE640] rounded-2xl pl-10 pr-9 py-2.5 text-sm text-[#111418] placeholder:text-[#8C9298] focus:outline-none transition-colors"
+                  placeholder="Search any food, dish, or brand (e.g. Lay's, Upma, Maggi, Dosa)..."
+                  className="w-full bg-[#F5F7F5] border border-[#EBEFEB] focus:border-[#BCE640] rounded-2xl pl-10 pr-9 py-2.5 text-xs text-[#111418] placeholder:text-[#8C9298] focus:outline-none transition-colors"
                 />
-                {searchQuery && (
+                {isSearchingApi ? (
+                  <Loader2 className="w-4 h-4 text-[#8C9298] absolute right-3 top-1/2 -translate-y-1/2 animate-spin" />
+                ) : searchQuery ? (
                   <button
                     onClick={() => setSearchQuery('')}
                     className="absolute right-3 top-1/2 -translate-y-1/2 text-[#8C9298] hover:text-black"
                   >
                     <X className="w-4 h-4" />
                   </button>
-                )}
+                ) : null}
               </div>
 
               {/* Category Pills */}
@@ -170,61 +340,77 @@ export const AddFoodModal: React.FC = () => {
                 ))}
               </div>
 
-              {/* Results List */}
-              <div className="space-y-1.5 pt-1">
-                <span className="text-[11px] font-bold uppercase tracking-wider text-[#8C9298] px-1 block mb-2">
-                  Database Items ({filteredFoods.length})
+              {/* Database Results Info */}
+              <div className="flex items-center justify-between text-[11px] font-bold text-[#8C9298] px-1 pt-1">
+                <span>RESULTS ({filteredFoods.length})</span>
+                <span className="flex items-center gap-1 text-[10px] text-[#6B9322]">
+                  <Globe className="w-3 h-3" /> Live Databases Active
                 </span>
+              </div>
 
-                {filteredFoods.length > 0 ? (
-                  <div className="space-y-2 max-h-[380px] overflow-y-auto pr-0.5">
-                    {filteredFoods.map((food) => (
-                      <div
-                        key={food.id}
-                        onClick={() => setSelectedFood(food)}
-                        className="flex items-center justify-between p-3.5 rounded-2xl bg-[#F8FAF8] hover:bg-[#F0F5EE] border border-[#EBEFEB] hover:border-[#D0E894] cursor-pointer transition-all"
-                      >
-                        <div className="min-w-0 pr-2">
-                          <h3 className="text-xs font-bold text-[#111418] truncate">
-                            {food.name}
-                          </h3>
-                          <p className="text-[11px] text-[#737A80] mt-0.5">
-                            P: {food.protein_per_100g}g • C: {food.carbs_per_100g}g • F: {food.fat_per_100g}g
-                          </p>
-                        </div>
-
-                        <div className="text-right shrink-0">
-                          <span className="text-xs font-bold text-[#111418] block">
-                            {food.calories_per_100g} kcal
+              {/* Results List */}
+              <div className="space-y-2 max-h-[340px] overflow-y-auto pr-0.5">
+                {filteredFoods.map((food) => (
+                  <div
+                    key={food.id}
+                    onClick={() => setSelectedFood(food)}
+                    className="flex items-center justify-between p-3.5 rounded-2xl bg-[#F8FAF8] hover:bg-[#F0F5EE] border border-[#EBEFEB] hover:border-[#D0E894] cursor-pointer transition-all"
+                  >
+                    <div className="min-w-0 pr-2">
+                      <div className="flex items-center gap-1.5">
+                        <h3 className="text-xs font-bold text-[#111418] truncate">
+                          {food.name}
+                        </h3>
+                        {food.source && (
+                          <span className="text-[9px] px-1.5 py-0.2 rounded-full bg-[#EBF0EB] text-[#5A635A] shrink-0 font-medium">
+                            {food.source}
                           </span>
-                          <span className="text-[10px] text-[#8C9298]">per 100g</span>
-                        </div>
+                        )}
                       </div>
-                    ))}
+                      <p className="text-[11px] text-[#737A80] mt-0.5">
+                        P: {food.protein_per_100g}g • C: {food.carbs_per_100g}g • F: {food.fat_per_100g}g
+                      </p>
+                    </div>
+
+                    <div className="text-right shrink-0">
+                      <span className="text-xs font-bold text-[#111418] block">
+                        {food.calories_per_100g} kcal
+                      </span>
+                      <span className="text-[10px] text-[#8C9298]">per 100g</span>
+                    </div>
                   </div>
-                ) : (
-                  <div className="p-6 text-center text-xs text-[#737A80]">
-                    No foods found matching "{searchQuery}"
-                  </div>
-                )}
+                ))}
+              </div>
+
+              {/* "+ Add Custom Dish to Cloud DB" CTA Button */}
+              <div className="pt-2 border-t border-[#F2F4F2]">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCustomName(searchQuery);
+                    setIsCustomMode(true);
+                  }}
+                  className="w-full py-2.5 px-4 rounded-xl bg-[#F4F6F4] hover:bg-[#E8EDE8] text-[#111418] text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  <Plus className="w-3.5 h-3.5 stroke-[2.5]" />
+                  <span>Add Custom Dish to Cloud Database</span>
+                </button>
               </div>
             </>
           ) : (
-            /* --- DETAIL & QUANTITY VIEW (Matches Reference Image 2 Screen 2) --- */
+            /* --- DETAIL & QUANTITY VIEW --- */
             <div className="space-y-5">
               {/* Food Title & Region */}
               <div className="text-center pt-2">
                 <h3 className="text-xl font-black text-[#111418]">
                   {selectedFood.name}
                 </h3>
-                {selectedFood.region && (
-                  <span className="text-xs font-medium text-[#737A80] block mt-0.5">
-                    {selectedFood.region} Cuisine • {selectedFood.source}
-                  </span>
-                )}
+                <span className="text-xs font-medium text-[#737A80] block mt-0.5">
+                  {selectedFood.region || 'Standard'} • Source: {selectedFood.source}
+                </span>
               </div>
 
-              {/* 4 Clean Minimalist Macro Stats (Matches Reference Image 2) */}
+              {/* 4 Clean Minimalist Macro Stats */}
               <div className="grid grid-cols-4 gap-2 text-center py-2.5 px-3 bg-[#F8FAF8] rounded-2xl border border-[#EAEFEA]">
                 <div>
                   <span className="text-sm font-black text-[#111418] block">
@@ -313,7 +499,7 @@ export const AddFoodModal: React.FC = () => {
                 </div>
               </div>
 
-              {/* Serving Unit Dropdown / Options */}
+              {/* Serving Unit Options */}
               <div>
                 <label className="block text-xs font-semibold text-[#737A80] mb-1.5">
                   Serving Unit
@@ -335,13 +521,15 @@ export const AddFoodModal: React.FC = () => {
                       }`}
                     >
                       <span>{unit.label}</span>
-                      {selectedUnitId === unit.id && <Check className="w-4 h-4 text-[#48631C]" />}
+                      <span className="text-[10px] text-[#737A80]">
+                        {unit.id === 'g' ? 'Base 100g' : `~${unit.grams}g`}
+                      </span>
                     </button>
                   ))}
                 </div>
               </div>
 
-              {/* Lime CTA Button (Matches Reference Image 2) */}
+              {/* Lime CTA Button */}
               <div className="pt-2">
                 <button
                   type="button"
@@ -353,7 +541,7 @@ export const AddFoodModal: React.FC = () => {
                 </button>
               </div>
 
-              {/* Nutritional Facts List (Matches Reference Image 2) */}
+              {/* Nutritional Facts List */}
               <div className="pt-3 border-t border-[#F2F4F2] space-y-2">
                 <h4 className="text-xs font-bold text-[#111418]">Nutritional Facts</h4>
                 <div className="divide-y divide-[#F2F4F2] text-xs">
